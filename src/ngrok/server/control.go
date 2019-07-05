@@ -10,6 +10,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+    "os"
+    "bufio"
 )
 
 const (
@@ -58,6 +60,8 @@ type Control struct {
 
 	// synchronizer for controller shutdown of entire Control
 	shutdown *util.Shutdown
+    
+    subdm string
 }
 
 func NewControl(ctlConn conn.Conn, authMsg *msg.Auth) {
@@ -82,6 +86,34 @@ func NewControl(ctlConn conn.Conn, authMsg *msg.Auth) {
 		ctlConn.Close()
 	}
 
+    checkToken := func(token string, filename string) (bool, error, string) {
+
+		if token == "" {
+			return false, nil, "";
+		}
+		f, err := os.Open(filename)
+		if err != nil {
+			return false, err, ""
+		}
+		buf := bufio.NewReader(f)
+		for {
+			line, err := buf.ReadString('\n')
+			line = strings.TrimSpace(line)
+            strs := strings.Split(line,"=")
+            skey := strings.TrimSpace(strs[0])
+			if skey == token {
+				return true, nil, strings.TrimSpace(strs[1])
+			}
+			if err != nil {
+				if err == io.EOF {
+					return false, nil, ""
+				}
+				return false, err, ""
+			}
+		}
+		return false, nil, ""
+	}
+    
 	// register the clientid
 	c.id = authMsg.ClientId
 	if c.id == "" {
@@ -100,6 +132,16 @@ func NewControl(ctlConn conn.Conn, authMsg *msg.Auth) {
 		failAuth(fmt.Errorf("Incompatible versions. Server %s, client %s. Download a new version at http://ngrok.com", version.MajorMinor(), authMsg.Version))
 		return
 	}
+    
+    c.conn.Info("login authtoken: %s", authMsg.User)
+    authd, err, subdm := checkToken(authMsg.User, "authtoken.conf")
+
+	if authd != true {
+		failAuth(fmt.Errorf("authtoken %s invalid", "is"));
+		return
+	}
+    
+    c.subdm = subdm
 
 	// register the control
 	if replaced := controlRegistry.Add(c.id, c); replaced != nil {
@@ -191,7 +233,21 @@ func (c *Control) manager() {
 
 			switch m := mRaw.(type) {
 			case *msg.ReqTunnel:
-				c.registerTunnel(m)
+                c.conn.Info("login subdomain: %s", m.Subdomain)
+                
+                subdmArr := strings.Split(c.subdm,",")
+                inSub := false
+                for _,value := range subdmArr{
+                    if value == m.Subdomain {
+                        inSub = true
+                    }
+                }
+                if inSub == true {
+                    c.registerTunnel(m)
+                } else {
+                    c.conn.Debug("login subdomain: %s, No assigned permissions", m.Subdomain)
+                    return
+                }
 
 			case *msg.Ping:
 				c.lastPing = time.Now()
